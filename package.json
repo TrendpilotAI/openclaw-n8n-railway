@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@composio/core": "^0.6.3",
+    "@convex-dev/workflow": "^0.3.4",
     "@langfuse/otel": "^4.6.1",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/auto-instrumentations-node": "^0.70.0",
@@ -21,9 +22,13 @@
     "@opentelemetry/sdk-node": "^0.212.0",
     "@opentelemetry/sdk-trace-base": "^2.5.1",
     "@traceloop/node-server-sdk": "^0.22.7",
+    "convex": "^1.32.0",
     "express": "^5.1.0",
     "http-proxy": "^1.18.1",
     "posthog-node": "^5.24.16",
     "tar": "^7.5.4"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
   }
 }

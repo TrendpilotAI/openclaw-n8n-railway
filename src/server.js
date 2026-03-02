@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { trace } from "@opentelemetry/api";
+import { ConvexHttpClient } from "convex/browser";
 import express from "express";
 import httpProxy from "http-proxy";
 import { PostHog } from "posthog-node";
@@ -117,6 +118,22 @@ const posthog = POSTHOG_API_KEY
       flushInterval: 30_000,
     })
   : null;
+
+// Convex workflow orchestration (guarded — no crash if URL not set).
+// Set CONVEX_URL in Railway env vars after deploying the Convex backend service.
+const CONVEX_URL = process.env.CONVEX_URL?.trim() || "";
+
+/**
+ * Create a fresh ConvexHttpClient per request.
+ * The client is stateful (holds credentials + mutation queue), so sharing a
+ * single instance across concurrent Express requests would leak state.
+ * Returns null when Convex is not configured.
+ * @returns {import("convex/browser").ConvexHttpClient | null}
+ */
+function createConvexClient() {
+  if (!CONVEX_URL) return null;
+  return new ConvexHttpClient(CONVEX_URL);
+}
 
 /** Track an event in PostHog with optional OTel trace correlation. */
 function trackEvent(event, properties = {}) {
@@ -619,6 +636,9 @@ app.get("/setup/healthz", (_req, res) => res.json({
     running: Boolean(gatewayProc),
     safeMode: crashCount > MAX_CRASHES,
     crashCount,
+  },
+  convex: {
+    enabled: Boolean(CONVEX_URL),
   },
 }));
 
@@ -1472,6 +1492,7 @@ app.get("/setup/api/debug", requireSetupAuth, async (_req, res) => {
       lastDoctorAt,
       lastDoctorOutput,
       railwayCommit: process.env.RAILWAY_GIT_COMMIT_SHA || null,
+      convexEnabled: Boolean(CONVEX_URL),
     },
     openclaw: {
       entry: getOpenClawEntry(),
@@ -1896,6 +1917,145 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
   }
 });
 
+// ---------------------------------------------------------------------------
+// Convex Workflow API (guarded — all endpoints no-op when CONVEX_URL is unset)
+// ---------------------------------------------------------------------------
+
+app.get("/setup/api/workflows/status", requireSetupAuth, async (_req, res) => {
+  res.json({
+    enabled: Boolean(CONVEX_URL),
+    convexUrl: CONVEX_URL ? "(set)" : "(not set)",
+  });
+});
+
+app.post("/setup/api/workflows/agent-task", requireSetupAuth, async (req, res) => {
+  const client = createConvexClient();
+  if (!client) {
+    return res.status(503).json({ ok: false, error: "Convex not configured (CONVEX_URL not set)" });
+  }
+
+  try {
+    const { taskDescription, agentId, models, maxRetries } = req.body || {};
+    if (!taskDescription) {
+      return res.status(400).json({ ok: false, error: "Missing taskDescription" });
+    }
+
+    // ConvexHttpClient requires the function reference as a string path.
+    const workflowId = await client.mutation("openclawApi:startAgentTask", {
+      taskDescription,
+      agentId: agentId || undefined,
+      models: models || undefined,
+      maxRetries: maxRetries || undefined,
+    });
+
+    trackEvent("workflow_started", { type: "agentTask", workflowId });
+    return res.json({ ok: true, workflowId });
+  } catch (err) {
+    console.error("[workflows/agent-task]", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+app.post("/setup/api/workflows/heartbeat", requireSetupAuth, async (req, res) => {
+  const client = createConvexClient();
+  if (!client) {
+    return res.status(503).json({ ok: false, error: "Convex not configured (CONVEX_URL not set)" });
+  }
+
+  try {
+    const { pingModel } = req.body || {};
+    const workflowId = await client.mutation("openclawApi:startHeartbeat", {
+      gatewayUrl: GATEWAY_TARGET,
+      pingModel: pingModel || undefined,
+    });
+
+    trackEvent("workflow_started", { type: "heartbeat", workflowId });
+    return res.json({ ok: true, workflowId });
+  } catch (err) {
+    console.error("[workflows/heartbeat]", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+app.post("/setup/api/workflows/sub-agents", requireSetupAuth, async (req, res) => {
+  const client = createConvexClient();
+  if (!client) {
+    return res.status(503).json({ ok: false, error: "Convex not configured (CONVEX_URL not set)" });
+  }
+
+  try {
+    const { parentAgentId, tasks } = req.body || {};
+    if (!parentAgentId || !Array.isArray(tasks) || tasks.length === 0) {
+      return res.status(400).json({ ok: false, error: "Missing parentAgentId or tasks array" });
+    }
+
+    const workflowId = await client.mutation("openclawApi:startSubAgentOrchestration", {
+      parentAgentId,
+      tasks,
+    });
+
+    trackEvent("workflow_started", { type: "subAgentOrchestration", workflowId });
+    return res.json({ ok: true, workflowId });
+  } catch (err) {
+    console.error("[workflows/sub-agents]", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+app.get("/setup/api/workflows/:workflowId", requireSetupAuth, async (req, res) => {
+  const client = createConvexClient();
+  if (!client) {
+    return res.status(503).json({ ok: false, error: "Convex not configured (CONVEX_URL not set)" });
+  }
+
+  try {
+    const status = await client.action("openclawApi:getWorkflowStatus", {
+      workflowId: req.params.workflowId,
+    });
+    return res.json({ ok: true, status });
+  } catch (err) {
+    console.error("[workflows/status]", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+app.post("/setup/api/workflows/:workflowId/cancel", requireSetupAuth, async (req, res) => {
+  const client = createConvexClient();
+  if (!client) {
+    return res.status(503).json({ ok: false, error: "Convex not configured (CONVEX_URL not set)" });
+  }
+
+  try {
+    await client.mutation("openclawApi:cancelWorkflow", {
+      workflowId: req.params.workflowId,
+    });
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[workflows/cancel]", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
+app.get("/setup/api/workflows", requireSetupAuth, async (req, res) => {
+  const client = createConvexClient();
+  if (!client) {
+    return res.status(503).json({ ok: false, error: "Convex not configured (CONVEX_URL not set)" });
+  }
+
+  try {
+    const type = req.query.type || undefined;
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+    const workflows = await client.query("openclawApi:listRecentWorkflows", {
+      type,
+      limit,
+    });
+    return res.json({ ok: true, workflows });
+  } catch (err) {
+    console.error("[workflows/list]", err);
+    return res.status(500).json({ ok: false, error: String(err) });
+  }
+});
+
 // Proxy everything else to the gateway.
 const proxy = httpProxy.createProxyServer({
   target: GATEWAY_TARGET,
@@ -1940,6 +2100,7 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   console.log(`[wrapper] gateway token: ${OPENCLAW_GATEWAY_TOKEN ? "(set)" : "(missing)"}`);
   console.log(`[wrapper] gateway target: ${GATEWAY_TARGET}`);
   console.log(`[wrapper] hooks token: ${OPENCLAW_HOOKS_TOKEN ? "(set)" : "(not set - n8n bridge disabled)"}`);
+  console.log(`[wrapper] convex workflows: ${CONVEX_URL ? "(enabled)" : "(not configured - set CONVEX_URL)"}`);
   if (N8N_WEBHOOK_URL) console.log(`[wrapper] n8n webhook url: ${N8N_WEBHOOK_URL}`);
   if (!SETUP_PASSWORD) {
     console.warn("[wrapper] WARNING: SETUP_PASSWORD is not set; /setup will error.");
