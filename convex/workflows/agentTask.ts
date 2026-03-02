@@ -153,8 +153,7 @@ export const recordResult = internalMutation({
   handler: async (ctx, args) => {
     const existing = await ctx.db
       .query("openclawWorkflows")
-      .withIndex("by_type_and_time", (q) => q.eq("type", "agentTask"))
-      .filter((q) => q.eq(q.field("workflowId"), args.workflowId))
+      .withIndex("by_workflow_id", (q) => q.eq("workflowId", args.workflowId))
       .first();
 
     if (existing) {

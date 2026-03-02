@@ -122,6 +122,7 @@ const posthog = POSTHOG_API_KEY
 // Convex workflow orchestration (guarded — no crash if URL not set).
 // Set CONVEX_URL in Railway env vars after deploying the Convex backend service.
 const CONVEX_URL = process.env.CONVEX_URL?.trim() || "";
+const CONVEX_SECRET = process.env.OPENCLAW_CONVEX_SECRET?.trim() || undefined;
 
 /**
  * Create a fresh ConvexHttpClient per request.
@@ -1949,17 +1950,18 @@ app.post("/setup/api/workflows/agent-task", requireSetupAuth, async (req, res) =
 
     // ConvexHttpClient requires the function reference as a string path.
     const workflowId = await client.mutation("openclawApi:startAgentTask", {
+      secret: CONVEX_SECRET,
       taskDescription,
       agentId: agentId || undefined,
-      models: models || undefined,
-      maxRetries: maxRetries || undefined,
+      models: Array.isArray(models) ? models : undefined,
+      maxRetries: maxRetries != null ? Number(maxRetries) : undefined,
     });
 
     trackEvent("workflow_started", { type: "agentTask", workflowId });
     return res.json({ ok: true, workflowId });
   } catch (err) {
-    console.error("[workflows/agent-task]", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    console.error("[workflows/agent-task]", redactSecrets(String(err)));
+    return res.status(500).json({ ok: false, error: redactSecrets(String(err)) });
   }
 });
 
@@ -1973,9 +1975,13 @@ app.post("/setup/api/workflows/heartbeat", requireSetupAuth, async (req, res) =>
     const { pingModel } = req.body || {};
     // Use the public-facing URL so Convex (running externally) can reach the
     // gateway. GATEWAY_TARGET is 127.0.0.1 and only valid inside this container.
-    const publicDomain = process.env.OPENCLAW_PUBLIC_URL?.trim() || process.env.RAILWAY_PUBLIC_DOMAIN?.trim() || "";
-    const publicGatewayUrl = publicDomain ? `https://${publicDomain}` : "";
+    const rawPublicUrl = process.env.OPENCLAW_PUBLIC_URL?.trim() || process.env.RAILWAY_PUBLIC_DOMAIN?.trim() || "";
+    // Strip existing protocol to avoid double-prefix (e.g. https://https://...)
+    const publicGatewayUrl = rawPublicUrl
+      ? (rawPublicUrl.startsWith("http") ? rawPublicUrl : `https://${rawPublicUrl}`)
+      : "";
     const workflowId = await client.mutation("openclawApi:startHeartbeat", {
+      secret: CONVEX_SECRET,
       gatewayUrl: publicGatewayUrl,
       gatewayToken: OPENCLAW_GATEWAY_TOKEN || undefined,
       pingModel: pingModel || undefined,
@@ -1984,8 +1990,8 @@ app.post("/setup/api/workflows/heartbeat", requireSetupAuth, async (req, res) =>
     trackEvent("workflow_started", { type: "heartbeat", workflowId });
     return res.json({ ok: true, workflowId });
   } catch (err) {
-    console.error("[workflows/heartbeat]", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    console.error("[workflows/heartbeat]", redactSecrets(String(err)));
+    return res.status(500).json({ ok: false, error: redactSecrets(String(err)) });
   }
 });
 
@@ -2002,6 +2008,7 @@ app.post("/setup/api/workflows/sub-agents", requireSetupAuth, async (req, res) =
     }
 
     const workflowId = await client.mutation("openclawApi:startSubAgentOrchestration", {
+      secret: CONVEX_SECRET,
       parentAgentId,
       tasks,
     });
@@ -2009,8 +2016,8 @@ app.post("/setup/api/workflows/sub-agents", requireSetupAuth, async (req, res) =
     trackEvent("workflow_started", { type: "subAgentOrchestration", workflowId });
     return res.json({ ok: true, workflowId });
   } catch (err) {
-    console.error("[workflows/sub-agents]", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    console.error("[workflows/sub-agents]", redactSecrets(String(err)));
+    return res.status(500).json({ ok: false, error: redactSecrets(String(err)) });
   }
 });
 
@@ -2022,12 +2029,13 @@ app.get("/setup/api/workflows/:workflowId", requireSetupAuth, async (req, res) =
 
   try {
     const status = await client.action("openclawApi:getWorkflowStatus", {
+      secret: CONVEX_SECRET,
       workflowId: req.params.workflowId,
     });
     return res.json({ ok: true, status });
   } catch (err) {
-    console.error("[workflows/status]", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    console.error("[workflows/status]", redactSecrets(String(err)));
+    return res.status(500).json({ ok: false, error: redactSecrets(String(err)) });
   }
 });
 
@@ -2039,12 +2047,13 @@ app.post("/setup/api/workflows/:workflowId/cancel", requireSetupAuth, async (req
 
   try {
     await client.mutation("openclawApi:cancelWorkflow", {
+      secret: CONVEX_SECRET,
       workflowId: req.params.workflowId,
     });
     return res.json({ ok: true });
   } catch (err) {
-    console.error("[workflows/cancel]", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    console.error("[workflows/cancel]", redactSecrets(String(err)));
+    return res.status(500).json({ ok: false, error: redactSecrets(String(err)) });
   }
 });
 
@@ -2055,16 +2064,22 @@ app.get("/setup/api/workflows", requireSetupAuth, async (req, res) => {
   }
 
   try {
-    const type = req.query.type || undefined;
+    const validTypes = ["agentTask", "heartbeat", "subAgentOrchestration"];
+    const rawType = req.query.type || undefined;
+    if (rawType && !validTypes.includes(rawType)) {
+      return res.status(400).json({ ok: false, error: `Invalid type. Must be one of: ${validTypes.join(", ")}` });
+    }
+    const type = rawType;
     const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
     const workflows = await client.query("openclawApi:listRecentWorkflows", {
+      secret: CONVEX_SECRET,
       type,
       limit,
     });
     return res.json({ ok: true, workflows });
   } catch (err) {
-    console.error("[workflows/list]", err);
-    return res.status(500).json({ ok: false, error: String(err) });
+    console.error("[workflows/list]", redactSecrets(String(err)));
+    return res.status(500).json({ ok: false, error: redactSecrets(String(err)) });
   }
 });
 
