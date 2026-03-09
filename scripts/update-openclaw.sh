@@ -30,7 +30,7 @@ resolve_ref() {
   local target="$1"
   case "$target" in
     --stable)
-      log "Resolving --stable (latest release tag)..."
+      echo "[update] Resolving --stable (latest release tag)..." >&2
       local tag
       tag=$(git ls-remote --tags --sort=-v:refname "$OPENCLAW_REPO" 'v*' 2>/dev/null \
         | grep -v '\-beta\|\-rc\|\-alpha\|\-dev' \
@@ -40,11 +40,11 @@ resolve_ref() {
       if [ -z "$tag" ]; then
         die "No stable release tags found"
       fi
-      log "Resolved --stable → $tag"
+      echo "[update] Resolved --stable → $tag" >&2
       echo "$tag"
       ;;
     --beta)
-      log "Resolving --beta (latest pre-release tag)..."
+      echo "[update] Resolving --beta (latest pre-release tag)..." >&2
       local tag
       tag=$(git ls-remote --tags --sort=-v:refname "$OPENCLAW_REPO" 'v*' 2>/dev/null \
         | grep -E '\-beta|\-rc|\-alpha' \
@@ -54,11 +54,11 @@ resolve_ref() {
       if [ -z "$tag" ]; then
         die "No beta/rc tags found"
       fi
-      log "Resolved --beta → $tag"
+      echo "[update] Resolved --beta → $tag" >&2
       echo "$tag"
       ;;
     --canary)
-      log "Resolved --canary → main"
+      echo "[update] Resolved --canary → main" >&2
       echo "main"
       ;;
     *)
