@@ -1232,8 +1232,8 @@ app.post("/setup/api/run", requireSetupAuth, async (req, res) => {
     // IMPORTANT: Set both gateway.auth.token (server-side) and gateway.remote.token (client-side)
     // to the same value so the Control UI can connect without "token mismatch" errors.
     await runCmd(getOpenClawNode(), clawArgs(["config", "set", "gateway.auth.mode", "token"]));
-    await runCmd(getOpenClawNode(), clawArgs(["config", "set", "gateway.auth.token", OPENCLAW_GATEWAY_TOKEN]));
-    await runCmd(getOpenClawNode(), clawArgs(["config", "set", "gateway.remote.token", OPENCLAW_GATEWAY_TOKEN]));
+    await runCmd(getOpenClawNode(), clawArgs(["config", "set", "gateway.auth.token", "${OPENCLAW_GATEWAY_TOKEN}"]));
+    await runCmd(getOpenClawNode(), clawArgs(["config", "set", "gateway.remote.token", "${OPENCLAW_GATEWAY_TOKEN}"]));
     // NOTE: Do NOT persist gateway.bind or gateway.port to the config file — they are
     // managed exclusively via CLI args in startGateway(). Persisting them can cause
     // schema-validation errors when OpenClaw upgrades change the config schema.
