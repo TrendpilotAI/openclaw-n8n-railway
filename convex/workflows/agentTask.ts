@@ -13,6 +13,17 @@ import { internal } from "../_generated/api";
 import { internalAction, internalMutation } from "../_generated/server";
 import { workflow } from "../index";
 
+/** Best-effort redaction for common secret formats in logs/output. */
+function redactSecrets(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/(sk-[A-Za-z0-9_-]{10,})/g, "[REDACTED]")
+    .replace(/(gho_[A-Za-z0-9_]{10,})/g, "[REDACTED]")
+    .replace(/(xox[baprs]-[A-Za-z0-9-]{10,})/g, "[REDACTED]")
+    .replace(/(xai-[A-Za-z0-9_-]{10,})/g, "[REDACTED]")
+    .replace(/(dsk-[A-Za-z0-9_-]{10,})/g, "[REDACTED]");
+}
+
 // ---------------------------------------------------------------------------
 // Workflow definition
 // ---------------------------------------------------------------------------
@@ -129,55 +140,70 @@ export const executeLlmCall = internalAction({
     const endpoint =
       args.gatewayUrl.replace(/\/$/, "") + "/v1/chat/completions";
 
+    const retries = Math.max(0, args.maxRetries);
+
     // Model fallback: try each model in sequence until one succeeds.
+    // Within each model, retry transient failures up to maxRetries times.
     for (const model of models) {
-      try {
-        console.log(
-          `[agentTask] executing task="${args.taskDescription}" agent=${args.agentId} model=${model}`,
-        );
+      for (let attempt = 0; attempt <= retries; attempt++) {
+        try {
+          console.log(
+            `[agentTask] executing agent=${args.agentId} model=${model} attempt=${attempt + 1}/${retries + 1}`,
+          );
 
-        const resp = await fetch(endpoint, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: "system",
-                content: `You are agent "${args.agentId}". Complete the following task.`,
-              },
-              { role: "user", content: args.taskDescription },
-            ],
-          }),
-          signal: AbortSignal.timeout(120_000), // 2 min per attempt
-        });
+          const resp = await fetch(endpoint, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              model,
+              messages: [
+                {
+                  role: "system",
+                  content: `You are agent "${args.agentId}". Complete the following task.`,
+                },
+                { role: "user", content: args.taskDescription },
+              ],
+            }),
+            signal: AbortSignal.timeout(120_000), // 2 min per attempt
+          });
 
-        if (!resp.ok) {
-          const body = await resp.text().catch(() => "");
-          throw new Error(`HTTP ${resp.status}: ${body.slice(0, 200)}`);
+          if (!resp.ok) {
+            const body = await resp.text().catch(() => "");
+            throw new Error(`HTTP ${resp.status}: ${body.slice(0, 200)}`);
+          }
+
+          const data = await resp.json();
+          const content =
+            data.choices?.[0]?.message?.content ?? JSON.stringify(data);
+          const usedModel = data.model ?? model;
+
+          return {
+            status: "completed" as const,
+            output: content,
+            model: usedModel,
+          };
+        } catch (err) {
+          lastError = redactSecrets(String(err));
+          const isLastAttempt = attempt === retries;
+          if (isLastAttempt) {
+            console.warn(
+              `[agentTask] model=${model} exhausted retries: ${lastError}, trying next model...`,
+            );
+          } else {
+            // Exponential backoff: 1s, 2s, 4s, ...
+            const delayMs = Math.min(1000 * 2 ** attempt, 16_000);
+            console.warn(
+              `[agentTask] model=${model} attempt ${attempt + 1} failed: ${lastError}, retrying in ${delayMs}ms...`,
+            );
+            await new Promise((r) => setTimeout(r, delayMs));
+          }
         }
-
-        const data = await resp.json();
-        const content =
-          data.choices?.[0]?.message?.content ?? JSON.stringify(data);
-        const usedModel = data.model ?? model;
-
-        return {
-          status: "completed" as const,
-          output: content,
-          model: usedModel,
-        };
-      } catch (err) {
-        lastError = String(err);
-        console.warn(
-          `[agentTask] model=${model} failed: ${lastError}, trying next fallback...`,
-        );
       }
     }
 
     return {
       status: "failed" as const,
-      output: `All models exhausted. Last error: ${lastError}`,
+      output: redactSecrets(`All models exhausted. Last error: ${lastError}`),
       model: undefined,
     };
   },

@@ -20,12 +20,23 @@ import { workflow } from "./index";
 function requireSecret(secret: string | undefined) {
   const expected = process.env.OPENCLAW_CONVEX_SECRET;
   if (!expected) {
-    // If no secret is configured, allow calls (development mode).
-    return;
+    throw new Error(
+      "OPENCLAW_CONVEX_SECRET is not configured. Set it in the Convex dashboard.",
+    );
   }
   if (secret !== expected) {
     throw new Error("Unauthorized: invalid or missing convex secret");
   }
+}
+
+/**
+ * Read gateway URL and token from Convex environment instead of accepting
+ * them from callers. This prevents SSRF — callers cannot supply arbitrary URLs.
+ */
+function getGatewayConfig() {
+  const url = process.env.OPENCLAW_GATEWAY_URL ?? "";
+  const token = process.env.OPENCLAW_GATEWAY_TOKEN ?? "";
+  return { gatewayUrl: url, gatewayToken: token };
 }
 
 // ---------------------------------------------------------------------------
@@ -39,12 +50,14 @@ export const startAgentTask = mutation({
     agentId: v.optional(v.string()),
     models: v.optional(v.array(v.string())),
     maxRetries: v.optional(v.number()),
-    gatewayUrl: v.string(),
-    gatewayToken: v.optional(v.string()),
   },
   returns: v.string(),
   handler: async (ctx, args) => {
     requireSecret(args.secret);
+    const gw = getGatewayConfig();
+    if (!gw.gatewayUrl) {
+      throw new Error("OPENCLAW_GATEWAY_URL is not configured in Convex environment");
+    }
     const workflowId = await workflow.start(
       ctx,
       internal.workflows.agentTask.agentTaskWorkflow,
@@ -53,8 +66,8 @@ export const startAgentTask = mutation({
         agentId: args.agentId,
         models: args.models,
         maxRetries: args.maxRetries,
-        gatewayUrl: args.gatewayUrl,
-        gatewayToken: args.gatewayToken,
+        gatewayUrl: gw.gatewayUrl,
+        gatewayToken: gw.gatewayToken,
       },
     );
     return workflowId;
@@ -64,19 +77,18 @@ export const startAgentTask = mutation({
 export const startHeartbeat = mutation({
   args: {
     secret: v.optional(v.string()),
-    gatewayUrl: v.optional(v.string()),
-    gatewayToken: v.optional(v.string()),
     pingModel: v.optional(v.string()),
   },
   returns: v.string(),
   handler: async (ctx, args) => {
     requireSecret(args.secret);
+    const gw = getGatewayConfig();
     const workflowId = await workflow.start(
       ctx,
       internal.workflows.heartbeat.heartbeatWorkflow,
       {
-        gatewayUrl: args.gatewayUrl,
-        gatewayToken: args.gatewayToken,
+        gatewayUrl: gw.gatewayUrl,
+        gatewayToken: gw.gatewayToken,
         pingModel: args.pingModel,
       },
     );
@@ -95,20 +107,22 @@ export const startSubAgentOrchestration = mutation({
         models: v.optional(v.array(v.string())),
       }),
     ),
-    gatewayUrl: v.string(),
-    gatewayToken: v.optional(v.string()),
   },
   returns: v.string(),
   handler: async (ctx, args) => {
     requireSecret(args.secret);
+    const gw = getGatewayConfig();
+    if (!gw.gatewayUrl) {
+      throw new Error("OPENCLAW_GATEWAY_URL is not configured in Convex environment");
+    }
     const workflowId = await workflow.start(
       ctx,
       internal.workflows.subAgentOrchestration.subAgentOrchestrationWorkflow,
       {
         parentAgentId: args.parentAgentId,
         tasks: args.tasks,
-        gatewayUrl: args.gatewayUrl,
-        gatewayToken: args.gatewayToken,
+        gatewayUrl: gw.gatewayUrl,
+        gatewayToken: gw.gatewayToken,
       },
     );
     return workflowId;

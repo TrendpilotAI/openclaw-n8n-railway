@@ -73,7 +73,7 @@ Parentheses and braces get mangled by multi-layer shell expansion. Use simple co
 
 ## Conventions
 
-- ES modules, no TypeScript, no CommonJS
+- ES modules, no TypeScript, no CommonJS (except `convex/` which requires `.ts`)
 - Vanilla JS for setup wizard UI
 - Guard all optional features for graceful degradation
 - `redactSecrets()` for any user-facing output

@@ -20,7 +20,7 @@ OPENCLAW_REPO="https://github.com/openclaw/openclaw.git"
 INSTALL_DIR="/data/openclaw"
 TARGET="${1:-main}"
 
-log() { echo "[update] $*"; }
+log() { echo "[update] $*" >&2; }
 die() { echo "[update] ERROR: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
@@ -30,7 +30,7 @@ resolve_ref() {
   local target="$1"
   case "$target" in
     --stable)
-      echo "[update] Resolving --stable (latest release tag)..." >&2
+      log "Resolving --stable (latest release tag)..."
       local tag
       tag=$(git ls-remote --tags --sort=-v:refname "$OPENCLAW_REPO" 'v*' 2>/dev/null \
         | grep -v '\-beta\|\-rc\|\-alpha\|\-dev' \
@@ -40,11 +40,11 @@ resolve_ref() {
       if [ -z "$tag" ]; then
         die "No stable release tags found"
       fi
-      echo "[update] Resolved --stable → $tag" >&2
+      log "Resolved --stable → $tag"
       echo "$tag"
       ;;
     --beta)
-      echo "[update] Resolving --beta (latest pre-release tag)..." >&2
+      log "Resolving --beta (latest pre-release tag)..."
       local tag
       tag=$(git ls-remote --tags --sort=-v:refname "$OPENCLAW_REPO" 'v*' 2>/dev/null \
         | grep -E '\-beta|\-rc|\-alpha' \
@@ -54,11 +54,11 @@ resolve_ref() {
       if [ -z "$tag" ]; then
         die "No beta/rc tags found"
       fi
-      echo "[update] Resolved --beta → $tag" >&2
+      log "Resolved --beta → $tag"
       echo "$tag"
       ;;
     --canary)
-      echo "[update] Resolved --canary → main" >&2
+      log "Resolved --canary → main"
       echo "main"
       ;;
     *)

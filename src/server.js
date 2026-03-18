@@ -216,6 +216,216 @@ function atomicWriteFile(filePath, content) {
   fs.renameSync(tmpPath, filePath);
 }
 
+function readJsonFileIfValid(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) return null;
+    const raw = fs.readFileSync(filePath, "utf8").trim();
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+const CRITICAL_CONFIG_KEYS = [
+  "agents",
+  "auth",
+  "bindings",
+  "cron",
+  "hooks",
+  "memory",
+  "models",
+  "plugins",
+  "session",
+];
+
+function collectConfigBackupPaths() {
+  try {
+    const p = configPath();
+    const dir = path.dirname(p);
+    const base = path.basename(p);
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.startsWith(`${base}.auto-bak-`) || f.startsWith(`${base}.bak-`))
+      .sort()
+      .reverse()
+      .map((f) => path.join(dir, f));
+  } catch {
+    return [];
+  }
+}
+
+function readMostRecentValidConfigBackup() {
+  for (const backupPath of collectConfigBackupPaths()) {
+    const config = readJsonFileIfValid(backupPath);
+    if (config) return { path: backupPath, config };
+  }
+  return null;
+}
+
+function enrichConfigWithSeed(nextCfg, seedCfg, preserved = []) {
+  if (!nextCfg || typeof nextCfg !== "object" || Array.isArray(nextCfg)) return { config: nextCfg, preserved };
+  if (!seedCfg || typeof seedCfg !== "object" || Array.isArray(seedCfg)) return { config: nextCfg, preserved };
+
+  const merged = { ...nextCfg };
+
+  for (const key of CRITICAL_CONFIG_KEYS) {
+    if (!(key in merged) && key in seedCfg) {
+      merged[key] = seedCfg[key];
+      preserved.push(key);
+    }
+  }
+
+  if (
+    seedCfg.agents &&
+    typeof seedCfg.agents === "object" &&
+    !Array.isArray(seedCfg.agents)
+  ) {
+    const nextAgents =
+      merged.agents && typeof merged.agents === "object" && !Array.isArray(merged.agents)
+        ? { ...merged.agents }
+        : {};
+
+    let agentsChanged = false;
+    if (!("list" in nextAgents) && "list" in seedCfg.agents) {
+      nextAgents.list = seedCfg.agents.list;
+      preserved.push("agents.list");
+      agentsChanged = true;
+    }
+    if (!("defaults" in nextAgents) && "defaults" in seedCfg.agents) {
+      nextAgents.defaults = seedCfg.agents.defaults;
+      preserved.push("agents.defaults");
+      agentsChanged = true;
+    }
+    if (agentsChanged) {
+      merged.agents = nextAgents;
+    }
+  }
+
+  return { config: merged, preserved };
+}
+
+/**
+ * Preserve critical config sections when the setup UI posts partial raw JSON.
+ * This protects advanced sections that the structured UI and older exports
+ * often omit: multi-agent entries, channel bindings, memory/session config,
+ * and plugin registrations.
+ */
+function preserveCriticalConfigSections(nextCfg, existingCfg) {
+  const preserved = [];
+  return enrichConfigWithSeed(nextCfg, existingCfg, preserved);
+}
+
+function shouldClearAutomationSessionOverrides(sessionKey) {
+  const raw = String(sessionKey || "").trim().toLowerCase();
+  if (!raw.startsWith("agent:")) return false;
+  const parts = raw.split(":");
+  if (parts[1] === "main") return true;
+  return parts.length >= 3 && (parts[2] === "main" || parts[2] === "cron");
+}
+
+function scrubAutomationSessionOverrides() {
+  try {
+    const agentsDir = path.join(STATE_DIR, "agents");
+    if (!fs.existsSync(agentsDir)) return { updatedStores: 0, updatedEntries: 0 };
+
+    let updatedStores = 0;
+    let updatedEntries = 0;
+    for (const agentId of fs.readdirSync(agentsDir)) {
+      const storePath = path.join(agentsDir, agentId, "sessions", "sessions.json");
+      const store = readJsonFileIfValid(storePath);
+      if (!store || typeof store !== "object" || Array.isArray(store)) continue;
+
+      let storeChanged = false;
+      for (const [sessionKey, entry] of Object.entries(store)) {
+        if (!shouldClearAutomationSessionOverrides(sessionKey)) continue;
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+
+        let entryChanged = false;
+        for (const key of [
+          "providerOverride",
+          "modelOverride",
+          "authProfileOverride",
+          "authProfileOverrideSource",
+          "authProfileOverrideCompactionCount",
+        ]) {
+          if (key in entry) {
+            delete entry[key];
+            entryChanged = true;
+          }
+        }
+        if (entryChanged) {
+          updatedEntries += 1;
+          storeChanged = true;
+        }
+      }
+
+      if (storeChanged) {
+        atomicWriteFile(storePath, JSON.stringify(store, null, 2));
+        updatedStores += 1;
+      }
+    }
+
+    if (updatedEntries > 0) {
+      console.log(
+        `[wrapper] cleared stale automation session overrides from ${updatedEntries} session(s) across ${updatedStores} store(s)`,
+      );
+    }
+    return { updatedStores, updatedEntries };
+  } catch (err) {
+    console.warn(`[wrapper] automation session cleanup failed (non-fatal): ${String(err)}`);
+    return { updatedStores: 0, updatedEntries: 0 };
+  }
+}
+
+function normalizeModelIdForCron(input) {
+  if (typeof input !== "string") return input;
+  const model = input.trim();
+  if (!model) return model;
+
+  if (model === "grok-4-latest") return "xai/grok-4";
+  if (model.startsWith("google-antigravity/")) {
+    return model.replace(/^google-antigravity\//, "gemini/");
+  }
+  return model;
+}
+
+function normalizeCronModelRefs() {
+  const cronPath = path.join(STATE_DIR, "cron", "jobs.json");
+  if (!fs.existsSync(cronPath)) return { updated: 0, updatedFiles: 0 };
+
+  const parsed = readJsonFileIfValid(cronPath);
+  if (!parsed) return { updated: 0, updatedFiles: 0 };
+
+  let updated = 0;
+  const rewrite = (node) => {
+    if (!node || typeof node !== "object") return;
+
+    if (Array.isArray(node)) {
+      for (const item of node) rewrite(item);
+      return;
+    }
+
+    for (const [k, v] of Object.entries(node)) {
+      if (k === "model" && typeof v === "string") {
+        const normalized = normalizeModelIdForCron(v);
+        if (normalized !== v) {
+          node[k] = normalized;
+          updated += 1;
+        }
+        continue;
+      }
+      if (v && typeof v === "object") rewrite(v);
+    }
+  };
+
+  rewrite(parsed);
+  if (!updated) return { updated: 0, updatedFiles: 0 };
+
+  atomicWriteFile(cronPath, JSON.stringify(parsed, null, 2));
+  return { updated, updatedFiles: 1 };
+}
+
 /**
  * Create a timestamped backup of the config file (if it exists and is valid JSON).
  * Keeps the last 5 auto-backups, pruning older ones.
@@ -252,25 +462,54 @@ function backupConfigIfExists() {
 function recoverFromBackup() {
   try {
     const p = configPath();
-    const dir = path.dirname(p);
-    const base = path.basename(p);
-    const backups = fs.readdirSync(dir)
-      .filter((f) => f.startsWith(`${base}.auto-bak-`) || f.startsWith(`${base}.bak-`))
-      .sort()
-      .reverse();
-
-    for (const backup of backups) {
-      try {
-        const raw = fs.readFileSync(path.join(dir, backup), "utf8");
-        JSON.parse(raw); // validate
-        fs.copyFileSync(path.join(dir, backup), p);
-        console.log(`[wrapper] recovered config from backup: ${backup}`);
-        return true;
-      } catch { continue; }
+    if (readJsonFileIfValid(p)) {
+      console.warn("[wrapper] config recovery skipped: current config is still valid");
+      return false;
     }
+    const backup = readMostRecentValidConfigBackup();
+    if (!backup?.path) return false;
+    fs.copyFileSync(backup.path, p);
+    console.log(`[wrapper] recovered config from backup: ${path.basename(backup.path)}`);
+    return true;
   } catch {}
   console.error("[wrapper] no valid backup found for recovery");
   return false;
+}
+
+function restoreMissingCriticalConfigSectionsFromBackup(cfg) {
+  const { config: restored, preserved } = enrichConfigWithSeed(cfg || {}, readMostRecentValidConfigBackup()?.config || {});
+  return { config: restored, preserved };
+}
+
+function sanitizeWrapperPollutionState() {
+  let repaired = false;
+
+  const sessions = scrubAutomationSessionOverrides();
+  if (sessions.updatedEntries > 0) repaired = true;
+
+  const cron = normalizeCronModelRefs();
+  if (cron.updated > 0) {
+    console.log(`[wrapper] normalized ${cron.updated} cron model reference(s)`);
+    repaired = true;
+  }
+
+  const current = readJsonFileIfValid(configPath());
+  if (current && typeof current === "object") {
+    const restoredFromBackup = restoreMissingCriticalConfigSectionsFromBackup(current);
+    if (restoredFromBackup.preserved.length > 0) {
+      try {
+        atomicWriteFile(configPath(), JSON.stringify(restoredFromBackup.config, null, 2));
+        console.log(
+          `[wrapper] restored missing critical sections from backup: ${restoredFromBackup.preserved.join(", ")}`,
+        );
+        repaired = true;
+      } catch (err) {
+        console.warn(`[wrapper] failed to restore missing sections from backup: ${String(err)}`);
+      }
+    }
+  }
+
+  return repaired;
 }
 
 /**
@@ -338,6 +577,14 @@ async function cleanupStaleConfigKeys() {
     if (changed) {
       atomicWriteFile(p, JSON.stringify(cfg, null, 2));
       console.log("[wrapper] config cleaned up");
+    }
+
+    const restoredFromBackup = restoreMissingCriticalConfigSectionsFromBackup(cfg);
+    if (restoredFromBackup.preserved.length > 0) {
+      atomicWriteFile(p, JSON.stringify(restoredFromBackup.config, null, 2));
+      console.log(
+        `[wrapper] restored missing critical sections from backup: ${restoredFromBackup.preserved.join(", ")}`,
+      );
     }
 
     // Run openclaw doctor --fix to strip any remaining unrecognized keys from the schema.
@@ -432,6 +679,7 @@ async function startGateway() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true });
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+  scrubAutomationSessionOverrides();
 
   const args = [
     "gateway",
@@ -523,6 +771,7 @@ async function ensureGatewayRunning() {
       try {
         lastGatewayError = null;
         backupConfigIfExists();
+        sanitizeWrapperPollutionState();
         await startGateway();
         const ready = await waitForGatewayReady({ timeoutMs: 60_000 });
         if (!ready) {
@@ -1062,6 +1311,18 @@ const PROVIDER_REGISTRY = {
     baseUrl: "https://api.x.ai/v1",
     api: "openai-completions",
     models: [
+      { id: "grok-3", name: "Grok 3" },
+      { id: "grok-3-mini", name: "Grok 3 Mini" },
+    ],
+  },
+  XAI_API_KEY: {
+    providerId: "xai",
+    apiKeyRef: "${XAI_API_KEY}",
+    baseUrl: "https://api.x.ai/v1",
+    api: "openai-completions",
+    models: [
+      { id: "grok-4", name: "Grok 4" },
+      { id: "grok-4-latest", name: "Grok 4 (Latest)" },
       { id: "grok-3", name: "Grok 3" },
       { id: "grok-3-mini", name: "Grok 3 Mini" },
     ],
@@ -1718,6 +1979,7 @@ app.get("/setup/api/config/raw", requireSetupAuth, async (_req, res) => {
 app.post("/setup/api/config/raw", requireSetupAuth, async (req, res) => {
   try {
     const content = String((req.body && req.body.content) || "");
+    const preserveMissingSections = (req.body && req.body.preserveMissingSections) !== false;
     if (content.length > 500_000) {
       return res.status(413).json({ ok: false, error: "Config too large" });
     }
@@ -1725,13 +1987,26 @@ app.post("/setup/api/config/raw", requireSetupAuth, async (req, res) => {
     fs.mkdirSync(STATE_DIR, { recursive: true });
 
     const p = configPath();
+    let existingCfg = preserveMissingSections ? readJsonFileIfValid(p) : null;
+    if (preserveMissingSections && !existingCfg) {
+      existingCfg = readMostRecentValidConfigBackup()?.config || null;
+    }
+    let normalizedContent = content;
+    let preserved = [];
+    if (preserveMissingSections) {
+      const parsedIncoming = JSON.parse(content);
+      const result = preserveCriticalConfigSections(parsedIncoming, existingCfg);
+      normalizedContent = JSON.stringify(result.config, null, 2);
+      preserved = result.preserved;
+    }
+
     // Backup
     if (fs.existsSync(p)) {
       const backupPath = `${p}.bak-${new Date().toISOString().replace(/[:.]/g, "-")}`;
       fs.copyFileSync(p, backupPath);
     }
 
-    atomicWriteFile(p, content);
+    atomicWriteFile(p, normalizedContent);
 
     // Config save exits safe mode.
     resetCrashCounter();
@@ -1741,7 +2016,7 @@ app.post("/setup/api/config/raw", requireSetupAuth, async (req, res) => {
       await restartGateway();
     }
 
-    res.json({ ok: true, path: p });
+    res.json({ ok: true, path: p, preserved });
   } catch (err) {
     res.status(500).json({ ok: false, error: String(err) });
   }
@@ -1948,21 +2223,14 @@ app.post("/setup/api/workflows/agent-task", requireSetupAuth, async (req, res) =
       return res.status(400).json({ ok: false, error: "Missing taskDescription" });
     }
 
-    // Resolve public gateway URL so Convex (running externally) can reach it.
-    const rawPublicUrl = process.env.OPENCLAW_PUBLIC_URL?.trim() || process.env.RAILWAY_PUBLIC_DOMAIN?.trim() || "";
-    const publicGatewayUrl = rawPublicUrl
-      ? (rawPublicUrl.startsWith("http") ? rawPublicUrl : `https://${rawPublicUrl}`)
-      : "";
-
-    // ConvexHttpClient requires the function reference as a string path.
+    // Gateway URL is now read from Convex env (OPENCLAW_GATEWAY_URL) to prevent
+    // SSRF. The Express server no longer passes it.
     const workflowId = await client.mutation("openclawApi:startAgentTask", {
       secret: CONVEX_SECRET,
       taskDescription,
       agentId: agentId || undefined,
       models: Array.isArray(models) ? models : undefined,
       maxRetries: maxRetries != null ? Number(maxRetries) : undefined,
-      gatewayUrl: publicGatewayUrl,
-      gatewayToken: OPENCLAW_GATEWAY_TOKEN || undefined,
     });
 
     trackEvent("workflow_started", { type: "agentTask", workflowId });
@@ -1981,17 +2249,8 @@ app.post("/setup/api/workflows/heartbeat", requireSetupAuth, async (req, res) =>
 
   try {
     const { pingModel } = req.body || {};
-    // Use the public-facing URL so Convex (running externally) can reach the
-    // gateway. GATEWAY_TARGET is 127.0.0.1 and only valid inside this container.
-    const rawPublicUrl = process.env.OPENCLAW_PUBLIC_URL?.trim() || process.env.RAILWAY_PUBLIC_DOMAIN?.trim() || "";
-    // Strip existing protocol to avoid double-prefix (e.g. https://https://...)
-    const publicGatewayUrl = rawPublicUrl
-      ? (rawPublicUrl.startsWith("http") ? rawPublicUrl : `https://${rawPublicUrl}`)
-      : "";
     const workflowId = await client.mutation("openclawApi:startHeartbeat", {
       secret: CONVEX_SECRET,
-      gatewayUrl: publicGatewayUrl,
-      gatewayToken: OPENCLAW_GATEWAY_TOKEN || undefined,
       pingModel: pingModel || undefined,
     });
 
@@ -2015,18 +2274,10 @@ app.post("/setup/api/workflows/sub-agents", requireSetupAuth, async (req, res) =
       return res.status(400).json({ ok: false, error: "Missing parentAgentId or tasks array" });
     }
 
-    // Resolve public gateway URL so Convex (running externally) can reach it.
-    const rawPublicUrl = process.env.OPENCLAW_PUBLIC_URL?.trim() || process.env.RAILWAY_PUBLIC_DOMAIN?.trim() || "";
-    const publicGatewayUrl = rawPublicUrl
-      ? (rawPublicUrl.startsWith("http") ? rawPublicUrl : `https://${rawPublicUrl}`)
-      : "";
-
     const workflowId = await client.mutation("openclawApi:startSubAgentOrchestration", {
       secret: CONVEX_SECRET,
       parentAgentId,
       tasks,
-      gatewayUrl: publicGatewayUrl,
-      gatewayToken: OPENCLAW_GATEWAY_TOKEN || undefined,
     });
 
     trackEvent("workflow_started", { type: "subAgentOrchestration", workflowId });
