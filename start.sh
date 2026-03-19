@@ -53,16 +53,22 @@ fi
 # Supports: --stable, --beta, --canary, or any branch/tag/SHA.
 if [ -n "$OPENCLAW_UPDATE_REF" ]; then
   echo "[update] Updating OpenClaw to: $OPENCLAW_UPDATE_REF"
-  if /app/scripts/update-openclaw.sh "$OPENCLAW_UPDATE_REF"; then
+  if \
+    PNPM_IGNORE_SCRIPTS="${PNPM_IGNORE_SCRIPTS:-true}" \
+    NPM_CONFIG_IGNORE_SCRIPTS="${NPM_CONFIG_IGNORE_SCRIPTS:-true}" \
+    OPENCLAW_PREFER_PNPM=1 \
+    /app/scripts/update-openclaw.sh "$OPENCLAW_UPDATE_REF"; then
     export OPENCLAW_ENTRY=/data/openclaw/dist/entry.js
     echo "[update] OpenClaw updated successfully"
   else
     echo "[update] Update failed, using built-in version"
   fi
-elif [ -f /data/openclaw/dist/entry.js ]; then
-  # A previous update exists on the volume — use it automatically.
+fi
+
+# A previous update exists on the volume — use it automatically when present.
+if [ -z "$OPENCLAW_ENTRY" ] && [ -f /data/openclaw/dist/entry.js ]; then
   export OPENCLAW_ENTRY=/data/openclaw/dist/entry.js
-  echo "[update] Using previously updated OpenClaw from /data/openclaw"
+  echo "[update] Using existing updated OpenClaw from /data/openclaw"
 fi
 
 # --- pnpm global bin ---
