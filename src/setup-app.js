@@ -216,7 +216,7 @@
     return httpJson('/setup/api/config/raw', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content: configTextEl.value })
+      body: JSON.stringify({ content: configTextEl.value, preserveMissingSections: false })
     }).then(function (j) {
       if (configOutEl) {
         var preserved = Array.isArray(j.preserved) && j.preserved.length

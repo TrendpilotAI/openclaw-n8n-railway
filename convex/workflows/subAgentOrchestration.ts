@@ -168,8 +168,9 @@ export const executeSubAgent = internalAction({
       }
 
       const data = await resp.json();
-      const content =
-        data.choices?.[0]?.message?.content ?? JSON.stringify(data);
+      const content = redactSecrets(
+        data.choices?.[0]?.message?.content ?? JSON.stringify(data),
+      );
 
       return {
         agentId: args.agentId,

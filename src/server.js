@@ -462,18 +462,18 @@ function backupConfigIfExists() {
 function recoverFromBackup() {
   try {
     const p = configPath();
-    if (readJsonFileIfValid(p)) {
-      console.warn("[wrapper] config recovery skipped: current config is still valid");
+    const backup = readMostRecentValidConfigBackup();
+    if (!backup?.path) {
+      console.error("[wrapper] no valid backup found for recovery");
       return false;
     }
-    const backup = readMostRecentValidConfigBackup();
-    if (!backup?.path) return false;
     fs.copyFileSync(backup.path, p);
     console.log(`[wrapper] recovered config from backup: ${path.basename(backup.path)}`);
     return true;
-  } catch {}
-  console.error("[wrapper] no valid backup found for recovery");
-  return false;
+  } catch (err) {
+    console.error(`[wrapper] config recovery failed: ${err}`);
+    return false;
+  }
 }
 
 function restoreMissingCriticalConfigSectionsFromBackup(cfg) {
@@ -2230,7 +2230,7 @@ app.post("/setup/api/workflows/agent-task", requireSetupAuth, async (req, res) =
       taskDescription,
       agentId: agentId || undefined,
       models: Array.isArray(models) ? models : undefined,
-      maxRetries: maxRetries != null ? Number(maxRetries) : undefined,
+      maxRetries: maxRetries != null ? Math.min(Math.max(0, Number(maxRetries) || 0), 5) : undefined,
     });
 
     trackEvent("workflow_started", { type: "agentTask", workflowId });

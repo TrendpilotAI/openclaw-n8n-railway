@@ -140,7 +140,8 @@ export const executeLlmCall = internalAction({
     const endpoint =
       args.gatewayUrl.replace(/\/$/, "") + "/v1/chat/completions";
 
-    const retries = Math.max(0, args.maxRetries);
+    // Cap retries to prevent unbounded loops (models × retries × 2min timeout).
+    const retries = Math.min(Math.max(0, args.maxRetries), 5);
 
     // Model fallback: try each model in sequence until one succeeds.
     // Within each model, retry transient failures up to maxRetries times.
@@ -173,8 +174,9 @@ export const executeLlmCall = internalAction({
           }
 
           const data = await resp.json();
-          const content =
-            data.choices?.[0]?.message?.content ?? JSON.stringify(data);
+          const content = redactSecrets(
+            data.choices?.[0]?.message?.content ?? JSON.stringify(data),
+          );
           const usedModel = data.model ?? model;
 
           return {

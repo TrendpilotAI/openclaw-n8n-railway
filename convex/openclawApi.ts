@@ -36,6 +36,12 @@ function requireSecret(secret: string | undefined) {
 function getGatewayConfig() {
   const url = process.env.OPENCLAW_GATEWAY_URL ?? "";
   const token = process.env.OPENCLAW_GATEWAY_TOKEN ?? "";
+  if (!token) {
+    throw new Error(
+      "OPENCLAW_GATEWAY_TOKEN is not configured in Convex environment. " +
+      "Set it in the Convex dashboard to match the Railway gateway token.",
+    );
+  }
   return { gatewayUrl: url, gatewayToken: token };
 }
 
