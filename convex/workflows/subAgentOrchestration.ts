@@ -11,6 +11,17 @@ import { internal } from "../_generated/api";
 import { internalAction, internalMutation } from "../_generated/server";
 import { workflow } from "../index";
 
+/** Best-effort redaction for common secret formats in logs/output. */
+function redactSecrets(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/(sk-[A-Za-z0-9_-]{10,})/g, "[REDACTED]")
+    .replace(/(gho_[A-Za-z0-9_]{10,})/g, "[REDACTED]")
+    .replace(/(xox[baprs]-[A-Za-z0-9-]{10,})/g, "[REDACTED]")
+    .replace(/(xai-[A-Za-z0-9_-]{10,})/g, "[REDACTED]")
+    .replace(/(dsk-[A-Za-z0-9_-]{10,})/g, "[REDACTED]");
+}
+
 // ---------------------------------------------------------------------------
 // Workflow definition
 // ---------------------------------------------------------------------------
@@ -132,7 +143,7 @@ export const executeSubAgent = internalAction({
 
     try {
       console.log(
-        `[subAgent] executing task="${args.taskDescription}" agent=${args.agentId} model=${model}`,
+        `[subAgent] executing agent=${args.agentId} model=${model}`,
       );
 
       const resp = await fetch(endpoint, {
@@ -157,8 +168,9 @@ export const executeSubAgent = internalAction({
       }
 
       const data = await resp.json();
-      const content =
-        data.choices?.[0]?.message?.content ?? JSON.stringify(data);
+      const content = redactSecrets(
+        data.choices?.[0]?.message?.content ?? JSON.stringify(data),
+      );
 
       return {
         agentId: args.agentId,
@@ -166,13 +178,14 @@ export const executeSubAgent = internalAction({
         output: content,
       };
     } catch (err) {
+      const safeErr = redactSecrets(String(err));
       console.error(
-        `[subAgent] agent=${args.agentId} model=${model} failed: ${err}`,
+        `[subAgent] agent=${args.agentId} model=${model} failed: ${safeErr}`,
       );
       return {
         agentId: args.agentId,
         status: "failed" as const,
-        output: `Sub-agent ${args.agentId} failed: ${String(err)}`,
+        output: `Sub-agent ${args.agentId} failed: ${safeErr}`,
       };
     }
   },

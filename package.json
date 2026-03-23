@@ -10,7 +10,8 @@
     "start": "node --import ./src/instrumentation.mjs src/server.js",
     "lint": "node -c src/server.js",
     "test": "node --test",
-    "smoke": "node scripts/smoke.js"
+    "smoke": "node scripts/smoke.js",
+    "quality:report": "node scripts/generate-quality-report.js"
   },
   "dependencies": {
     "@composio/core": "^0.6.3",

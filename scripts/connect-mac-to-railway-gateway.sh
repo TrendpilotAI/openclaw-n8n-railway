@@ -112,11 +112,29 @@ if [[ -z "$GATEWAY_TOKEN" && "$SKIP_TOKEN_FETCH" -ne 1 ]]; then
     exit 1
   fi
   echo "Fetching gateway token from Railway service: $RAILWAY_SERVICE"
+
+  # First try: read the token from the environment variable directly.
   GATEWAY_TOKEN="$(
-    railway ssh -s "$RAILWAY_SERVICE" -- openclaw config get gateway.auth.token 2>/dev/null \
-      | tail -n 1 \
+    railway ssh -s "$RAILWAY_SERVICE" -- sh -lc 'printf %s "${OPENCLAW_GATEWAY_TOKEN:-}"' 2>/dev/null \
       | tr -d '\r'
   )"
+
+  # Second try: read from config (may return env-ref literal like ${OPENCLAW_GATEWAY_TOKEN}).
+  if [[ -z "$GATEWAY_TOKEN" ]]; then
+    GATEWAY_TOKEN="$(
+      railway ssh -s "$RAILWAY_SERVICE" -- openclaw config get gateway.auth.token 2>/dev/null \
+        | tail -n 1 \
+        | tr -d '\r'
+    )"
+  fi
+
+  # Detect env-ref literals (e.g. ${OPENCLAW_GATEWAY_TOKEN}) — these are not usable tokens.
+  if [[ "$GATEWAY_TOKEN" =~ ^\$\{.+\}$ ]]; then
+    echo "Config returned env-ref literal: $GATEWAY_TOKEN" >&2
+    echo "The token is stored as an env-ref and could not be resolved." >&2
+    echo "Pass --token <value> with the actual token instead." >&2
+    GATEWAY_TOKEN=""
+  fi
 fi
 
 if [[ -z "$GATEWAY_TOKEN" ]]; then

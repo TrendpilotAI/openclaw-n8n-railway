@@ -216,9 +216,14 @@
     return httpJson('/setup/api/config/raw', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ content: configTextEl.value })
+      body: JSON.stringify({ content: configTextEl.value, preserveMissingSections: false })
     }).then(function (j) {
-      if (configOutEl) configOutEl.textContent = 'Saved: ' + (j.path || '') + '\nGateway restarted.\n';
+      if (configOutEl) {
+        var preserved = Array.isArray(j.preserved) && j.preserved.length
+          ? '\nPreserved missing sections: ' + j.preserved.join(', ') + '\n'
+          : '';
+        configOutEl.textContent = 'Saved: ' + (j.path || '') + '\nGateway restarted.\n' + preserved;
+      }
       return refreshStatus();
     }).catch(function (e) {
       if (configOutEl) configOutEl.textContent += '\nError: ' + String(e) + '\n';
